@@ -138,17 +138,20 @@ python3 cli/ai_send.py history computer-A --limit 20
 | 场景 | 状态 |
 |------|------|
 | 单机 A→A 自发自收 | ✅ 验证通过 |
-| A↔B 跨电脑协作 | 🔲 Phase 5 进行中 |
-| 需求澄清多轮对话 | 🔲 Phase 5 进行中 |
+| A↔B 跨电脑协作 | ✅ 验证通过（echo + requirement_clarification） |
+| 需求澄清单轮任务 | ✅ 验证通过（A 发需求 → B 回 3 个问题） |
+| 需求澄清多轮对话 | 🔲 待 mock 支持上下文 |
 | 自动重连（断线重连） | ✅ 验证通过 |
+| 离线消息补推（pending → 上线时拉取） | ✅ 验证通过 |
 
 ## Roadmap
 
 - [x] Phase 1：Hub 部署 + WebSocket 路由
 - [x] Phase 2：Agent Daemon + CLI
 - [x] Phase 3：单机 A→A 全链路验证
-- [ ] Phase 4：B 电脑接入
-- [ ] Phase 5：需求澄清多轮任务
+- [x] Phase 4：B 电脑接入（已上线 A↔B）
+- [x] Phase 5：端到端回包链路验证（含回包路由修复）
+- [ ] Phase 5b：真实需求澄清多轮对话（需要 mock 支持上下文，或接入真 Claude）
 - [ ] Phase 6：接入真实 Claude API（替换 mock）
 - [ ] Phase 7：TLS + 限流 + 审计
 - [ ] Phase 8：Web UI（任务看板 + 对话历史）
@@ -158,6 +161,20 @@ python3 cli/ai_send.py history computer-A --limit 20
 - Bearer Token 通过环境变量注入，**不要写进代码**
 - ECS 安全组**只放行你的电脑 IP**，不要 `0.0.0.0/0`
 - 生产环境上 TLS（Let's Encrypt）+ 限流
+
+## 踩过的坑（重要教训）
+
+调试 A↔B 端到端通信时连踩 4 个隐藏 bug：
+
+1. **Hub WS 转发未持久化**：收到 A 的任务后直接转发给 B，但没存 db。导致 B 回包时 Hub 查不到原消息的 frm
+2. **Hub 收到 result 不转发**：原来只 `mark_delivered` 不推送给原发送方，A 永远收不到 result
+3. **daemon 收到 result 当成任务处理**：result 消息没 `params.task` 字段，daemon 傻乎乎按空任务处理 → 产生空 result 循环风暴
+4. **UNIQUE 约束失败 + 重复 mark_delivered**：修复 #1 后又踩这两个，需要 `INSERT OR IGNORE` + `AND status='pending'`
+5. **离线消息不补推**：B 上线时 Hub 不会主动拉 pending，加 `push_pending_messages()` 在连接时触发
+
+修复后链路：A 发任务 → Hub 持久化 → 转发 → B 处理 → B 发 result → Hub 查 frm → 转发 result 给 A。
+
+详见 `docs/PITFALLS.md`（待补）
 
 ## License
 

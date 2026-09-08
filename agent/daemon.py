@@ -66,7 +66,6 @@ async def connect_and_listen():
                 send_task = asyncio.create_task(sender(ws))
 
                 async for raw in ws:
-                    print(f"🔍 RAW 收到: {raw[:200]}")
                     try:
                         msg = json.loads(raw)
                         if "ack" in msg:
@@ -75,8 +74,12 @@ async def connect_and_listen():
                         if "error" in msg:
                             print(f"❌ ERROR: {msg}")
                             continue
+                        # 回包（不是新任务，不进 inbox）
+                        if "result" in msg or "reply_to" in msg:
+                            print(f"📩 收到回包: id={msg.get('id')} result={msg.get('result')}")
+                            continue
                         # 真实任务消息
-                        print(f"\n📨 收到任务 (id={msg.get('id', '?')})")
+                        print(f"\n📨 收到任务 (id={msg.get('id', '?')}) from {msg.get('from', '?')}")
                         await inbox.put(msg)
                     except json.JSONDecodeError:
                         print(f"⚠️  非 JSON: {raw}")

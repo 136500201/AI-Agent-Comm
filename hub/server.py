@@ -84,7 +84,7 @@ def save_message(msg: dict, frm: str, too: str):
     params = msg.get("params", {})
     task = params.get("task", {}) if isinstance(params, dict) else {}
     task_type = task.get("type", "unknown") if isinstance(task, dict) else "unknown"
-    c.execute('''INSERT INTO messages (id, method, frm, too, payload, status, reply_to, task_type, created_at)
+    c.execute('''INSERT OR IGNORE INTO messages (id, method, frm, too, payload, status, reply_to, task_type, created_at)
                  VALUES (?,?,?,?,?,?,?,?,?)''',
               (msg_id, msg.get("method", "msg"), frm, too, json.dumps(msg, ensure_ascii=False),
                "pending", msg.get("reply_to"), task_type, datetime.utcnow().isoformat()))
@@ -95,10 +95,27 @@ def save_message(msg: dict, frm: str, too: str):
 def mark_delivered(msg_id: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('UPDATE messages SET status=?, delivered_at=? WHERE id=?',
-              ("delivered", datetime.utcnow().isoformat(), msg_id))
+    # 只标记仍然 pending 的（避免回包乱标）
+    c.execute('UPDATE messages SET status=?, delivered_at=? WHERE id=? AND status=?',
+              ("delivered", datetime.utcnow().isoformat(), msg_id, "pending"))
     conn.commit()
     conn.close()
+
+async def push_pending_messages(computer_id: str):
+    """客户端上线时，把 pending 消息推给它"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, payload FROM messages WHERE too=? AND status=? LIMIT 50',
+              (computer_id, "pending"))
+    rows = c.fetchall()
+    conn.close()
+    for msg_id, payload in rows:
+        try:
+            await manager.send(computer_id, payload)
+            mark_delivered(msg_id)
+            print(f"[{computer_id}] 重连后补推 pending id={msg_id}")
+        except Exception as e:
+            print(f"[{computer_id}] 补推失败 id={msg_id}: {e}")
 
 # ============ FastAPI App ============
 @asynccontextmanager
@@ -199,6 +216,9 @@ async def websocket_endpoint(websocket: WebSocket, computer_id: str, token: str 
 
     await manager.connect(computer_id, websocket)
 
+    # 上线时拉取待发消息（避免对方下线时发的任务被"吞"）
+    await push_pending_messages(computer_id)
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -210,26 +230,40 @@ async def websocket_endpoint(websocket: WebSocket, computer_id: str, token: str 
 
             # 收到的消息可能是回包 (result) 或新消息
             if "result" in msg or "error" in msg:
-                # 回包：标记原消息已交付
+                # 回包：查原消息发送方，转发回去 + 标记交付
                 reply_to = msg.get("id") or msg.get("reply_to")
                 if reply_to:
-                    mark_delivered(reply_to)
-                print(f"[{computer_id}] reply: {msg.get('result', msg.get('error'))}")
+                    conn = sqlite3.connect(DB_PATH)
+                    c = conn.cursor()
+                    c.execute('SELECT frm FROM messages WHERE id=?', (reply_to,))
+                    row = c.fetchone()
+                    conn.close()
+                    if row:
+                        original_sender = row[0]
+                        await manager.send(original_sender, json.dumps(msg, ensure_ascii=False))
+                        mark_delivered(reply_to)
+                        print(f"[{computer_id}] reply → {original_sender}")
+                    else:
+                        print(f"[{computer_id}] reply_to={reply_to} 原消息未找到")
+                else:
+                    print(f"[{computer_id}] reply without reply_to: {msg.get('result', msg.get('error'))}")
             else:
-                # 新消息：转发
+                # 新消息：先持久化（必须！回包时要查原消息的 frm），再转发
                 target = msg.get("to") or (msg.get("params", {}) or {}).get("to")
                 if not target:
                     await websocket.send_text(json.dumps({"error": "missing 'to' field"}))
                     continue
                 msg["from"] = computer_id  # 强制覆盖
+                # 持久化（用消息原 id，没有就生成）
+                msg_id = msg.get("id") or str(uuid.uuid4())
+                msg["id"] = msg_id
+                save_message(msg, computer_id, target)
                 delivered = await manager.send(target, json.dumps(msg, ensure_ascii=False))
                 if delivered:
-                    msg_id = msg.get("id") or str(uuid.uuid4())
                     mark_delivered(msg_id)
                     await websocket.send_text(json.dumps({"ack": True, "id": msg_id}))
                 else:
-                    # 离线消息：保存，等目标上线拉取
-                    msg_id = save_message(msg, computer_id, target)
+                    # 离线：消息已 save_message 持久化，状态保持 pending
                     await websocket.send_text(json.dumps({
                         "ack": False, "id": msg_id,
                         "reason": f"{target} offline, queued"
