@@ -10,6 +10,7 @@ import os
 from datetime import datetime
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 
@@ -138,6 +139,41 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "online": list(manager.active.keys())}
+
+@app.get("/api/messages")
+def all_messages(limit: int = 100, authorization: Optional[str] = Header(None)):
+    """群聊对话记录 - 返回所有消息按时间倒序"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "missing bearer token")
+    token = authorization.split(" ", 1)[1]
+    if token not in TOKEN_MAP:
+        raise HTTPException(403, "invalid token")
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''SELECT id, method, frm, too, payload, status, task_type, created_at, delivered_at, reply_to
+                 FROM messages ORDER BY created_at DESC LIMIT ?''', (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return {
+        "count": len(rows),
+        "messages": [
+            {
+                "id": r[0], "method": r[1], "from": r[2], "to": r[3],
+                "payload": json.loads(r[4]), "status": r[5], "task_type": r[6],
+                "created_at": r[7], "delivered_at": r[8], "reply_to": r[9]
+            } for r in rows
+        ]
+    }
+
+@app.get("/chat", response_class=HTMLResponse)
+def chat_page():
+    """群聊对话记录页面（每次读模板，方便改 UI 不重启）"""
+    from pathlib import Path
+    template = Path(__file__).parent / "templates" / "chat.html"
+    if template.exists():
+        return HTMLResponse(template.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>chat template not found</h1>")
 
 class MessageIn(BaseModel):
     frm: str
