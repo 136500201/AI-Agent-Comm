@@ -135,7 +135,9 @@ footer { padding: 30px 24px; text-align: center; color: var(--text-dim); font-si
 </header>
 
 <div class="controls">
-  <input type="password" id="token" placeholder="Bearer Token (tok-A-... 或 tok-B-...)" style="width: 280px;">
+  <select id="identity" style="min-width: 220px;">
+    <option value="">选择身份...</option>
+  </select>
   <select id="limit">
     <option value="50">最近 50 条</option>
     <option value="100" selected>最近 100 条</option>
@@ -170,18 +172,40 @@ footer { padding: 30px 24px; text-align: center; color: var(--text-dim); font-si
 </footer>
 
 <script>
-const TOKEN_KEY = 'a2a_mesh_token';
+const SELECTED_KEY = 'a2a_mesh_selected_identity';
 let autoTimer = null;
 let autoEnabled = true;
+let identities = [];   // [{id, token, masked}]
 
 function init() {
-  const saved = localStorage.getItem(TOKEN_KEY);
-  if (saved) document.getElementById('token').value = saved;
-  document.getElementById('token').addEventListener('change', e => {
-    localStorage.setItem(TOKEN_KEY, e.target.value);
+  loadIdentities().then(() => {
+    const saved = localStorage.getItem(SELECTED_KEY);
+    if (saved) document.getElementById('identity').value = saved;
+    if (document.getElementById('identity').value) loadMessages();
+    else {
+      document.getElementById('feed').innerHTML =
+        '<div class="empty"><h2>👋 请选择身份</h2><p>从下拉选一个 computer 身份开始查看对话</p></div>';
+    }
   });
-  loadMessages();
   startAutoRefresh();
+}
+
+async function loadIdentities() {
+  try {
+    const res = await fetch('/api/identities');
+    const data = await res.json();
+    identities = data.identities || [];
+    const sel = document.getElementById('identity');
+    sel.innerHTML = '<option value="">选择身份...</option>' +
+      identities.map(i => `<option value="${i.id}">🖥️ ${i.id} (${i.masked})</option>`).join('');
+    sel.addEventListener('change', e => {
+      localStorage.setItem(SELECTED_KEY, e.target.value);
+      loadMessages();
+    });
+  } catch (e) {
+    document.getElementById('identity').innerHTML =
+      '<option value="">⚠️ 无法加载身份列表</option>';
+  }
 }
 
 function startAutoRefresh() {
@@ -201,11 +225,17 @@ function toggleAutoRefresh() {
   }
 }
 
+function getSelectedToken() {
+  const id = document.getElementById('identity').value;
+  const found = identities.find(i => i.id === id);
+  return found ? found.token : null;
+}
+
 async function loadMessages() {
-  const token = document.getElementById('token').value.trim();
+  const token = getSelectedToken();
   if (!token) {
     document.getElementById('feed').innerHTML =
-      '<div class="empty"><h2>🔑 需要 Token</h2><p>在输入框填入 A 或 B 的 Token（tok-A-... 或 tok-B-...）</p></div>';
+      '<div class="empty"><h2>👋 请选择身份</h2><p>从下拉选一个 computer 身份开始查看对话</p></div>';
     return;
   }
   const limit = document.getElementById('limit').value;

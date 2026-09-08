@@ -140,6 +140,16 @@ def root():
 def health():
     return {"status": "ok", "online": list(manager.active.keys())}
 
+@app.get("/api/identities")
+def list_identities():
+    """返回所有可用身份（id + token）— 供前端下拉选"""
+    return {
+        "identities": [
+            {"id": cid, "token": tok, "masked": f"{tok[:6]}…{tok[-4:]}"}
+            for tok, cid in TOKEN_MAP.items()
+        ]
+    }
+
 @app.get("/api/messages")
 def all_messages(limit: int = 100, authorization: Optional[str] = Header(None)):
     """群聊对话记录 - 返回所有消息按时间倒序"""
