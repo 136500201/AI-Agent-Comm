@@ -1,7 +1,7 @@
 """
-A2A Mesh - Agent Daemon (简化版)
-不依赖 claude-agent-sdk，先跑通通信。
-AI 处理逻辑用本地 mock（Phase 5 再接真实 Claude）。
+A2A Mesh - Agent Daemon
+AI 处理调真 Claude API (Phase 6)
+如未配置 ANTHROPIC_API_KEY 则回退到 mock。
 """
 import asyncio
 import json
@@ -16,43 +16,72 @@ import websockets
 HUB_URL = os.getenv("HUB_URL", "ws://127.0.0.1:8086")
 COMPUTER_ID = os.getenv("COMPUTER_ID", "computer-A")
 TOKEN = os.getenv("TOKEN", "tok-A-dev-2026-a2a")
+USE_CLAUDE = bool(os.getenv("ANTHROPIC_API_KEY"))
 
 inbox: asyncio.Queue = None
 outbox: asyncio.Queue = None
 
-# ============ 任务处理（mock 版）============
-async def handle_task(task: dict) -> dict:
-    """处理任务 - MVP 版本直接 mock 回包"""
+# 延迟导入 Claude 客户端（避免无 anthropic 包时报错）
+claude_client = None
+if USE_CLAUDE:
+    try:
+        from claude_client import call_claude, _build_task_prompt
+        claude_client = call_claude
+        print(f"[{datetime.now().isoformat()}] ✅ Claude API 已启用 (model: claude-sonnet-4-5)")
+    except ImportError as e:
+        print(f"⚠️ 无法 import claude_client: {e}，回退到 mock")
+        USE_CLAUDE = False
+
+# ============ 任务处理 ============
+async def handle_task(task: dict, from_id: str = "unknown") -> dict:
+    """处理任务 - 优先调真 Claude，无 API key 时回退 mock"""
     task_type = task.get("type", "unknown")
     task_input = task.get("input", {})
 
-    # Mock 响应：真实场景会调 Claude API
-    if task_type == "requirement_clarification":
-        requirement = task_input.get("requirement") or task_input.get("text", "")
-        mock_response = {
+    # 真 Claude 处理
+    if USE_CLAUDE and claude_client:
+        prompt = _build_task_prompt(task)
+        result = await claude_client(prompt, from_id=from_id, task_type=task_type)
+
+        if "error" in result:
+            return {
+                "status": "error",
+                "output": {
+                    "error": result["error"],
+                    "hint": result.get("hint", ""),
+                    "task_type": task_type,
+                }
+            }
+
+        return {
             "status": "completed",
             "output": {
-                "summary": f"B 电脑收到需求: {requirement[:50]}...",
+                "reply": result["text"],
+                "task_type": task_type,
+                "model": result.get("model"),
+                "tokens": result.get("usage"),
+            }
+        }
+
+    # Mock 回退
+    if task_type == "requirement_clarification":
+        requirement = task_input.get("requirement") or task_input.get("text", "")
+        return {
+            "status": "completed",
+            "output": {
+                "summary": f"B 收到需求: {requirement[:50]}...",
                 "questions": [
-                    "Q1: 这个需求的目标用户是谁？",
+                    "Q1: 目标用户是谁？",
                     "Q2: 期望什么时候完成？",
                     "Q3: 有什么参考实现吗？"
                 ],
-                "note": "（mock 响应，Phase 5 接真实 Claude）"
+                "note": "（mock，设置 ANTHROPIC_API_KEY 启用真 Claude）"
             }
         }
     elif task_type == "echo":
-        mock_response = {
-            "status": "completed",
-            "output": {"echo": task_input}
-        }
+        return {"status": "completed", "output": {"echo": task_input}}
     else:
-        mock_response = {
-            "status": "completed",
-            "output": {"echo": task_input, "task_type": task_type}
-        }
-
-    return mock_response
+        return {"status": "completed", "output": {"echo": task_input, "task_type": task_type}}
 
 # ============ 长连接 + 断线重连 ============
 async def connect_and_listen():
