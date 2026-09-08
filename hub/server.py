@@ -82,9 +82,18 @@ def save_message(msg: dict, frm: str, too: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     msg_id = msg.get("id") or str(uuid.uuid4())
-    params = msg.get("params", {})
-    task = params.get("task", {}) if isinstance(params, dict) else {}
-    task_type = task.get("type", "unknown") if isinstance(task, dict) else "unknown"
+    # 识别消息类型
+    if "result" in msg:
+        task_type = "result"
+        # result 用原 id + "_reply" 后缀，避免和原任务 id 冲突被 IGNORE
+        msg_id = f"{msg_id}_reply"
+    elif "error" in msg:
+        task_type = "error"
+        msg_id = f"{msg_id}_err"
+    else:
+        params = msg.get("params", {})
+        task = params.get("task", {}) if isinstance(params, dict) else {}
+        task_type = task.get("type", "unknown") if isinstance(task, dict) else "unknown"
     c.execute('''INSERT OR IGNORE INTO messages (id, method, frm, too, payload, status, reply_to, task_type, created_at)
                  VALUES (?,?,?,?,?,?,?,?,?)''',
               (msg_id, msg.get("method", "msg"), frm, too, json.dumps(msg, ensure_ascii=False),
@@ -286,6 +295,13 @@ async def websocket_endpoint(websocket: WebSocket, computer_id: str, token: str 
                     conn.close()
                     if row:
                         original_sender = row[0]
+                        # result 也存一份（task_type=result 让聊天页能看到回包）
+                        try:
+                            new_id = save_message(msg, computer_id, original_sender)
+                            # 标记 result 自身为已交付（已被成功路由给原发送方）
+                            mark_delivered(new_id)
+                        except Exception as e:
+                            print(f"[{computer_id}] save reply err: {e}")
                         await manager.send(original_sender, json.dumps(msg, ensure_ascii=False))
                         mark_delivered(reply_to)
                         print(f"[{computer_id}] reply → {original_sender}")
