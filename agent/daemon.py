@@ -16,10 +16,24 @@ import websockets
 HUB_URL = os.getenv("HUB_URL", "ws://127.0.0.1:8086")
 COMPUTER_ID = os.getenv("COMPUTER_ID", "computer-A")
 TOKEN = os.getenv("TOKEN", "tok-A-dev-2026-a2a")
+
+# 处理后端优先级：dsh > claude > mock
+USE_DSH = bool(os.getenv("HARNESS_BASE"))
 USE_CLAUDE = bool(os.getenv("ANTHROPIC_API_KEY"))
 
 inbox: asyncio.Queue = None
 outbox: asyncio.Queue = None
+
+# 延迟导入 dsh 客户端（必须与 dsh 同机，因为 dsh 只绑 127.0.0.1）
+dsh_client = None
+if USE_DSH:
+    try:
+        from dsh_client import call_dsh, _build_task_prompt as _dsh_build_prompt
+        dsh_client = call_dsh
+        print(f"[{datetime.now().isoformat()}] ✅ DSH Harness 已启用 (model: {os.getenv('HARNESS_MODEL', 'MiniMax-M3')})")
+    except ImportError as e:
+        print(f"⚠️ 无法 import dsh_client: {e}，回退到 claude/mock")
+        USE_DSH = False
 
 # 延迟导入 Claude 客户端（避免无 anthropic 包时报错）
 claude_client = None
@@ -27,18 +41,47 @@ if USE_CLAUDE:
     try:
         from claude_client import call_claude, _build_task_prompt
         claude_client = call_claude
-        print(f"[{datetime.now().isoformat()}] ✅ Claude API 已启用 (model: claude-sonnet-4-5)")
+        if not USE_DSH:
+            print(f"[{datetime.now().isoformat()}] ✅ Claude API 已启用 (model: claude-sonnet-4-5)")
     except ImportError as e:
         print(f"⚠️ 无法 import claude_client: {e}，回退到 mock")
         USE_CLAUDE = False
 
+if not USE_DSH and not USE_CLAUDE:
+    print(f"[{datetime.now().isoformat()}] ⚠️  No LLM backend, falling back to mock")
+
 # ============ 任务处理 ============
 async def handle_task(task: dict, from_id: str = "unknown") -> dict:
-    """处理任务 - 优先调真 Claude，无 API key 时回退 mock"""
+    """处理任务 - 优先级 dsh > claude > mock"""
     task_type = task.get("type", "unknown")
     task_input = task.get("input", {})
 
-    # 真 Claude 处理
+    # 1) DSH Harness 处理（真 agent，能跑命令读文件）
+    if USE_DSH and dsh_client:
+        prompt = _dsh_build_prompt(task)
+        try:
+            result = await dsh_client(prompt, from_id=from_id, task_type=task_type)
+            return {
+                "status": "completed",
+                "output": {
+                    "reply": result["text"],
+                    "task_type": task_type,
+                    "model": result.get("model"),
+                    "backend": "dsh",
+                    "sessionId": result.get("sessionId"),
+                }
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "output": {
+                    "error": f"dsh: {type(e).__name__}: {e}",
+                    "hint": "检查 HARNESS_BASE / HARNESS_COOKIE_JAR / dsh 是否运行",
+                    "task_type": task_type,
+                }
+            }
+
+    # 2) 真 Claude 处理
     if USE_CLAUDE and claude_client:
         prompt = _build_task_prompt(task)
         result = await claude_client(prompt, from_id=from_id, task_type=task_type)
@@ -60,10 +103,11 @@ async def handle_task(task: dict, from_id: str = "unknown") -> dict:
                 "task_type": task_type,
                 "model": result.get("model"),
                 "tokens": result.get("usage"),
+                "backend": "claude",
             }
         }
 
-    # Mock 回退
+    # 3) Mock 回退
     if task_type == "requirement_clarification":
         requirement = task_input.get("requirement") or task_input.get("text", "")
         return {
@@ -75,7 +119,7 @@ async def handle_task(task: dict, from_id: str = "unknown") -> dict:
                     "Q2: 期望什么时候完成？",
                     "Q3: 有什么参考实现吗？"
                 ],
-                "note": "（mock，设置 ANTHROPIC_API_KEY 启用真 Claude）"
+                "note": "（mock，配 HARNESS_BASE 或 ANTHROPIC_API_KEY 启用真模型）"
             }
         }
     elif task_type == "echo":

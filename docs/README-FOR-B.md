@@ -14,13 +14,15 @@ A 电脑修了 4 个关键 bug，B 端 daemon 需要更新才能正常通信。
 
 ---
 
-## 🤖 如果你想让 B-Agent 真正"动脑子"（Phase 6）
+## 🤖 如果你想让 B-Agent 真正"动脑子"（Phase 6 / Phase 7）
 
-升级 B daemon 用真 Claude API（替代 mock）。
+升级 B daemon 用真模型：
 
-📄 **Claude 升级指南**：[B-CLAUDE-UPGRADE.md](./B-CLAUDE-UPGRADE.md)
+📄 **Claude 升级指南**：[B-CLAUDE-UPGRADE.md](./B-CLAUDE-UPGRADE.md) — 调 Anthropic Claude（备选）
 
-5 步：拉代码 → 装 anthropic → 配 API Key → 重启 daemon
+📄 **DSH Harness 集成**：[HARNESS-INSTALL.md](./HARNESS-INSTALL.md) — 接 dsh → MiniMax-M3（**推荐**，能跑命令读文件）
+
+5 步：拉代码 → 装依赖 → 配环境变量 → 换 cookie → 重启 daemon
 
 ---
 
