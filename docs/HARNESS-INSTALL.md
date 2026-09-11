@@ -126,13 +126,29 @@ curl -b ~/.dsh-daemon-cookies.txt \
 
 ### Step 5：重启 daemon
 
+**macOS / Linux 普通启动**：
 ```bash
 # 杀旧 daemon
-kill $(cat ~/a2a-agent-B.pid)
+kill $(cat ~/a2a-agent-B.pid) 2>/dev/null
 
 # 启动新 daemon
 source ~/.a2a-mesh.env
 nohup python3 agent/daemon.py --id "$COMPUTER_ID" --token "$TOKEN" --hub "$HUB_URL" \
+  < /dev/null > ~/a2a-agent-B.log 2>&1 &
+echo $! > ~/a2a-agent-B.pid
+```
+
+**WSL2 / Docker 内启动（强烈推荐）**：
+
+WSL2 systemd (PID 1) 会清理 orphan shell 子进程，nohup 不够。**必须用 `setsid`**：
+
+```bash
+# 杀旧 daemon
+kill $(cat ~/a2a-agent-B.pid) 2>/dev/null
+
+# 启动新 daemon（setsid 脱离父进程）
+source ~/.a2a-mesh.env
+setsid python3 -u agent/daemon.py --id "$COMPUTER_ID" --token "$TOKEN" --hub "$HUB_URL" \
   < /dev/null > ~/a2a-agent-B.log 2>&1 &
 echo $! > ~/a2a-agent-B.pid
 ```
